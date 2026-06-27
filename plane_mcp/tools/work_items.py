@@ -1,5 +1,6 @@
 """Work item-related tools for Plane MCP Server."""
 
+import re
 from html import escape
 from typing import Annotated, Any, get_args
 
@@ -25,16 +26,101 @@ from plane_mcp.tools.pql_reference import PQL_FIELD_HINT, PQL_FULL_REFERENCE
 logger = get_logger(__name__)
 
 
-def _resolve_description_html(description_html: str | None, description_stripped: str | None) -> str | None:
+def _md_inline(text: str) -> str:
+    """Convert inline markdown (escaped HTML) for **bold**, *italic*, `code`.
+
+    The input is escaped first so any literal HTML the caller typed is rendered
+    as text, then a small set of inline markers are turned into tags. Inline
+    code is handled before bold/italic so emphasis markers inside backticks are
+    left untouched.
+    """
+    out = escape(text)
+    # Inline code first: `code` -> <code>code</code>
+    out = re.sub(r"`([^`]+)`", lambda m: f"<code>{m.group(1)}</code>", out)
+    # Bold: **text** -> <strong>text</strong>
+    out = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{m.group(1)}</strong>", out)
+    # Italic: *text* -> <em>text</em> (remaining single asterisks)
+    out = re.sub(r"\*(.+?)\*", lambda m: f"<em>{m.group(1)}</em>", out)
+    return out
+
+
+def _markdown_to_html(markdown: str) -> str:
+    """Convert a small, safe subset of markdown to sanitized HTML.
+
+    No external dependency. The source is HTML-escaped before any tags are
+    emitted, so only the tags this converter produces (<h1..3>, <p>, <ul>,
+    <li>, <strong>, <em>, <code>) ever reach the output — caller-supplied HTML
+    is rendered as inert text. Supported block constructs:
+
+      * `#`, `##`, `###` headings -> <h1>..<h3>
+      * lines starting with `- ` or `* ` -> <ul><li>...</li></ul>
+      * blank-line-separated runs of text -> <p>...</p>
+    Inline `**bold**`, `*italic*` and `` `code` `` are handled within blocks.
+    """
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    html_parts: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            html_parts.append("<p>" + "<br/>".join(_md_inline(line) for line in paragraph) + "</p>")
+            paragraph.clear()
+
+    def flush_list() -> None:
+        if list_items:
+            html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ul>")
+            list_items.clear()
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            continue
+
+        heading = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if heading:
+            flush_paragraph()
+            flush_list()
+            level = len(heading.group(1))
+            html_parts.append(f"<h{level}>{_md_inline(heading.group(2).strip())}</h{level}>")
+            continue
+
+        bullet = re.match(r"^[-*]\s+(.*)$", line)
+        if bullet:
+            flush_paragraph()
+            list_items.append(_md_inline(bullet.group(1).strip()))
+            continue
+
+        # Plain text line accumulates into the current paragraph.
+        flush_list()
+        paragraph.append(line)
+
+    flush_paragraph()
+    flush_list()
+    return "".join(html_parts)
+
+
+def _resolve_description_html(
+    description_html: str | None,
+    description_stripped: str | None,
+    description_markdown: str | None = None,
+) -> str | None:
     """Resolve the description_html to persist.
 
     Plane recomputes description_stripped server-side from description_html on
     every save, so a stripped value sent on write is silently discarded. When the
     caller supplies only plain text, wrap it into minimal HTML so the description
     actually lands. description_html always wins when both are given.
+
+    Precedence: description_html > description_markdown > description_stripped.
+    description_markdown is converted to sanitized HTML via _markdown_to_html.
     """
     if description_html is not None:
         return description_html
+    if description_markdown is not None:
+        return _markdown_to_html(description_markdown)
     if description_stripped is not None:
         return "<p>" + escape(description_stripped).replace("\n", "<br/>") + "</p>"
     return None
@@ -194,6 +280,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         point: int | None = None,
         description_html: str | None = None,
         description_stripped: str | None = None,
+        description_markdown: str | None = None,
         priority: str | None = None,
         start_date: str | None = None,
         target_date: str | None = None,
@@ -205,9 +292,11 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         state: str | None = None,
         estimate_point: str | None = None,
         type: str | None = None,
-    ) -> WorkItem:
+        module_id: str | None = None,
+        cycle_id: str | None = None,
+    ) -> dict[str, Any]:
         """
-        Create a new work item.
+        Create a new work item, optionally attaching it to a module and/or cycle.
 
         Args:
             project_id: UUID of the project
@@ -220,6 +309,11 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             description_stripped: Plain text description. Convenience only — it is
                 wrapped into HTML and stored as description_html (Plane derives
                 description_stripped server-side). Ignored if description_html is set.
+            description_markdown: Markdown description. Convenience only — converted
+                to sanitized HTML and stored as description_html. Supports #/##/###
+                headings, blank-line-separated paragraphs, `-`/`*` bullet lists,
+                **bold**, *italic*, and `inline code`. Ignored if description_html is
+                set; wins over description_stripped.
             priority: Priority level (urgent, high, medium, low, none)
             start_date: Start date (ISO 8601 format)
             target_date: Target/end date (ISO 8601 format)
@@ -231,9 +325,17 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             state: UUID of the state
             estimate_point: Estimate point value
             type: Work item type identifier
+            module_id: UUID of a module to attach the new item to (optional). The
+                item is created first, then attached in a separate server call; if
+                the attach fails the created item is still returned.
+            cycle_id: UUID of a cycle to attach the new item to (optional). Same
+                create-then-attach behaviour as module_id.
 
         Returns:
-            Created WorkItem object
+            A dict with:
+              work_item: the created WorkItem (model_dump).
+              module_attach: {attempted, ok, error} when module_id was given, else null.
+              cycle_attach: {attempted, ok, error} when cycle_id was given, else null.
         """
         client, workspace_slug = get_plane_client_context()
 
@@ -247,7 +349,9 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             labels=labels,
             type_id=type_id,
             point=point,
-            description_html=_resolve_description_html(description_html, description_stripped),
+            description_html=_resolve_description_html(
+                description_html, description_stripped, description_markdown
+            ),
             priority=validated_priority,
             start_date=start_date,
             target_date=target_date,
@@ -261,7 +365,56 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             type=type,
         )
 
-        return client.work_items.create(workspace_slug=workspace_slug, project_id=project_id, data=data)
+        created: WorkItem = client.work_items.create(
+            workspace_slug=workspace_slug, project_id=project_id, data=data
+        )
+
+        # CreateWorkItem has extra="ignore" and drops any module/cycle fields, so
+        # attach explicitly via the same SDK paths used by manage_module_work_items
+        # and manage_cycle_work_items. A failed attach must not lose the created item.
+        new_id = created.id
+        module_attach: dict[str, Any] | None = None
+        cycle_attach: dict[str, Any] | None = None
+
+        if module_id is not None:
+            module_attach = {"attempted": True, "ok": False, "error": None}
+            if not new_id:
+                module_attach["error"] = "created work item has no id; cannot attach to module"
+            else:
+                try:
+                    client.modules.add_work_items(
+                        workspace_slug=workspace_slug,
+                        project_id=project_id,
+                        module_id=module_id,
+                        issue_ids=[new_id],
+                    )
+                    module_attach["ok"] = True
+                except Exception as e:  # noqa: BLE001 - report, never lose the item
+                    logger.warning("create_work_item: module attach failed for %s → %s", new_id, e)
+                    module_attach["error"] = str(e)
+
+        if cycle_id is not None:
+            cycle_attach = {"attempted": True, "ok": False, "error": None}
+            if not new_id:
+                cycle_attach["error"] = "created work item has no id; cannot attach to cycle"
+            else:
+                try:
+                    client.cycles.add_work_items(
+                        workspace_slug=workspace_slug,
+                        project_id=project_id,
+                        cycle_id=cycle_id,
+                        issue_ids=[new_id],
+                    )
+                    cycle_attach["ok"] = True
+                except Exception as e:  # noqa: BLE001 - report, never lose the item
+                    logger.warning("create_work_item: cycle attach failed for %s → %s", new_id, e)
+                    cycle_attach["error"] = str(e)
+
+        return {
+            "work_item": created.model_dump() if hasattr(created, "model_dump") else created,
+            "module_attach": module_attach,
+            "cycle_attach": cycle_attach,
+        }
 
     @mcp.tool()
     def retrieve_work_item(
@@ -376,6 +529,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         point: int | None = None,
         description_html: str | None = None,
         description_stripped: str | None = None,
+        description_markdown: str | None = None,
         priority: str | None = None,
         start_date: str | None = None,
         target_date: str | None = None,
@@ -403,6 +557,11 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             description_stripped: Plain text description. Convenience only — it is
                 wrapped into HTML and stored as description_html (Plane derives
                 description_stripped server-side). Ignored if description_html is set.
+            description_markdown: Markdown description. Convenience only — converted
+                to sanitized HTML and stored as description_html. Supports #/##/###
+                headings, blank-line-separated paragraphs, `-`/`*` bullet lists,
+                **bold**, *italic*, and `inline code`. Ignored if description_html is
+                set; wins over description_stripped.
             priority: Priority level (urgent, high, medium, low, none)
             start_date: Start date (ISO 8601 format)
             target_date: Target/end date (ISO 8601 format)
@@ -430,7 +589,9 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             labels=labels,
             type_id=type_id,
             point=point,
-            description_html=_resolve_description_html(description_html, description_stripped),
+            description_html=_resolve_description_html(
+                description_html, description_stripped, description_markdown
+            ),
             priority=validated_priority,
             start_date=start_date,
             target_date=target_date,
@@ -450,6 +611,125 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             work_item_id=work_item_id,
             data=data,
         )
+
+    @mcp.tool()
+    def bulk_create_work_items(project_id: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Create many work items in one MCP call.
+
+        This is a convenience wrapper: it is ONE MCP call but performs N server
+        round-trips (one create per element), so it is not transactional —
+        earlier items may succeed while a later one fails. Each element is
+        processed independently and its outcome reported in order.
+
+        Each element of `items` is a dict of work item fields. `name` is
+        required; supported keys mirror create_work_item (excluding project_id,
+        which comes from the top-level argument): name, assignees, labels,
+        type_id, point, description_html, description_stripped,
+        description_markdown, priority, start_date, target_date, sort_order,
+        is_draft, external_source, external_id, parent, state, estimate_point,
+        type. (Per-item module_id/cycle_id attach is not supported here — create
+        the item then use manage_module_work_items / manage_cycle_work_items.)
+
+        Args:
+            project_id: UUID of the project all items are created in.
+            items: List of work item field dicts (see above).
+
+        Returns:
+            A list of result dicts in input order, each:
+              {index, ok: True, id: <new work item id>} on success, or
+              {index, ok: False, error: <message>} on failure.
+        """
+        client, workspace_slug = get_plane_client_context()
+        results: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            try:
+                fields = dict(item)
+                fields.pop("project_id", None)
+                fields.pop("module_id", None)
+                fields.pop("cycle_id", None)
+                priority = fields.pop("priority", None)
+                validated_priority: PriorityEnum | None = (
+                    priority if priority in get_args(PriorityEnum) else None  # type: ignore[assignment]
+                )
+                description_html = fields.pop("description_html", None)
+                description_stripped = fields.pop("description_stripped", None)
+                description_markdown = fields.pop("description_markdown", None)
+                data = CreateWorkItem(
+                    priority=validated_priority,
+                    description_html=_resolve_description_html(
+                        description_html, description_stripped, description_markdown
+                    ),
+                    **fields,
+                )
+                created: WorkItem = client.work_items.create(
+                    workspace_slug=workspace_slug, project_id=project_id, data=data
+                )
+                results.append({"index": index, "ok": True, "id": created.id})
+            except Exception as e:  # noqa: BLE001 - report per-item, keep going
+                logger.warning("bulk_create_work_items: item %d failed → %s", index, e)
+                results.append({"index": index, "ok": False, "error": str(e)})
+        return results
+
+    @mcp.tool()
+    def bulk_update_work_items(updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Update many work items in one MCP call.
+
+        This is a convenience wrapper: it is ONE MCP call but performs N server
+        round-trips (one update per element), so it is not transactional —
+        earlier updates may succeed while a later one fails. Each element is
+        processed independently and its outcome reported in order.
+
+        Each element of `updates` is a dict that MUST contain `project_id` and
+        `work_item_id`; the remaining keys are update fields mirroring
+        update_work_item: name, assignees, labels, type_id, point,
+        description_html, description_stripped, description_markdown, priority,
+        start_date, target_date, sort_order, is_draft, external_source,
+        external_id, parent, state, estimate_point, type.
+
+        Args:
+            updates: List of update dicts; each needs project_id + work_item_id.
+
+        Returns:
+            A list of result dicts in input order, each:
+              {index, ok: True, id: <work item id>} on success, or
+              {index, ok: False, error: <message>} on failure.
+        """
+        client, workspace_slug = get_plane_client_context()
+        results: list[dict[str, Any]] = []
+        for index, update in enumerate(updates):
+            try:
+                fields = dict(update)
+                upd_project_id = fields.pop("project_id", None)
+                work_item_id = fields.pop("work_item_id", None)
+                if not upd_project_id or not work_item_id:
+                    raise ValueError("each update must include project_id and work_item_id")
+                priority = fields.pop("priority", None)
+                validated_priority: PriorityEnum | None = (
+                    priority if priority in get_args(PriorityEnum) else None  # type: ignore[assignment]
+                )
+                description_html = fields.pop("description_html", None)
+                description_stripped = fields.pop("description_stripped", None)
+                description_markdown = fields.pop("description_markdown", None)
+                data = UpdateWorkItem(
+                    priority=validated_priority,
+                    description_html=_resolve_description_html(
+                        description_html, description_stripped, description_markdown
+                    ),
+                    **fields,
+                )
+                client.work_items.update(
+                    workspace_slug=workspace_slug,
+                    project_id=upd_project_id,
+                    work_item_id=work_item_id,
+                    data=data,
+                )
+                results.append({"index": index, "ok": True, "id": work_item_id})
+            except Exception as e:  # noqa: BLE001 - report per-item, keep going
+                logger.warning("bulk_update_work_items: item %d failed → %s", index, e)
+                results.append({"index": index, "ok": False, "error": str(e)})
+        return results
 
     @mcp.tool()
     def delete_work_item(project_id: str, work_item_id: str) -> None:

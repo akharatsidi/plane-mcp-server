@@ -3,6 +3,7 @@
 from typing import Any, get_args
 
 from fastmcp import FastMCP
+from plane.errors import HttpError
 from plane.models.enums import TimezoneEnum
 from plane.models.estimates import (
     CreateEstimate,
@@ -363,21 +364,32 @@ def register_project_tools(mcp: FastMCP) -> None:
         return client.projects.update_features(workspace_slug=workspace_slug, project_id=project_id, data=data)
 
     @mcp.tool()
-    def get_project_estimate(project_id: str) -> Estimate:
+    def get_project_estimate(project_id: str) -> Estimate | dict[str, Any]:
         """
         Get the estimate configuration for a project.
 
         Returns the active estimate system including its ID, which is required
         to call list_project_estimate_points.
 
+        Estimates are optional per project: a project may have no estimate system
+        configured. In that case this returns {"configured": false, "estimate": null}
+        instead of raising, so callers can distinguish "no estimate" from an error.
+
         Args:
             project_id: UUID of the project
 
         Returns:
-            Estimate object with id, name, and type fields
+            Estimate object with id, name, and type fields when an estimate is
+            configured, or {"configured": false, "estimate": null} when the
+            project has no estimate.
         """
         client, workspace_slug = get_plane_client_context()
-        return client.estimates.retrieve(workspace_slug=workspace_slug, project_id=project_id)
+        try:
+            return client.estimates.retrieve(workspace_slug=workspace_slug, project_id=project_id)
+        except HttpError as e:
+            if e.status_code == 404:
+                return {"configured": False, "estimate": None}
+            raise
 
     @mcp.tool()
     def list_project_estimate_points(project_id: str, estimate_id: str) -> list[EstimatePoint]:

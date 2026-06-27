@@ -3,6 +3,7 @@
 from fastmcp import FastMCP
 
 from plane_mcp.tools.cycles import register_cycle_tools
+from plane_mcp.tools.exports import register_export_tools
 from plane_mcp.tools.initiatives import register_initiative_tools
 from plane_mcp.tools.intake import register_intake_tools
 from plane_mcp.tools.invites import register_invite_tools
@@ -15,6 +16,7 @@ from plane_mcp.tools.pql import register_pql_tools
 from plane_mcp.tools.projects import register_project_tools
 from plane_mcp.tools.states import register_state_tools
 from plane_mcp.tools.users import register_user_tools
+from plane_mcp.tools.views import register_view_tools
 from plane_mcp.tools.work_item_activities import register_work_item_activity_tools
 from plane_mcp.tools.work_item_attachments import register_work_item_attachment_tools
 from plane_mcp.tools.work_item_comments import register_work_item_comment_tools
@@ -52,3 +54,5 @@ def register_tools(mcp: FastMCP) -> None:
     register_workspace_tools(mcp)
     register_milestone_tools(mcp)
     register_pql_tools(mcp)
+    register_view_tools(mcp)
+    register_export_tools(mcp)

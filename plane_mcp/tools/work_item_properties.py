@@ -123,6 +123,7 @@ def register_work_item_property_tools(mcp: FastMCP) -> None:
     def create_work_item_property(
         display_name: str,
         property_type: str,
+        name: str | None = None,
         project_id: str | None = None,
         work_item_type_id: str | None = None,
         relation_type: str | None = None,
@@ -148,6 +149,8 @@ def register_work_item_property_tools(mcp: FastMCP) -> None:
         Args:
             display_name: Display name for the property
             property_type: TEXT | DATETIME | DECIMAL | BOOLEAN | OPTION | RELATION | URL | EMAIL | FILE | FORMULA
+            name: Optional internal slug used in PQL/URLs. Auto-derived from
+                display_name server-side if omitted ("ICE Score" -> "ice_score").
             project_id: UUID of the project. Omit for workspace-level property.
             work_item_type_id: UUID of the work item type — omit to create at project level
             relation_type: ISSUE | USER — required when property_type=RELATION
@@ -187,6 +190,7 @@ def register_work_item_property_tools(mcp: FastMCP) -> None:
             processed_options = [CreateWorkItemPropertyOption(**opt) for opt in options]
 
         data = CreateWorkItemProperty(
+            name=name,
             display_name=display_name,
             property_type=validated_property_type,
             relation_type=validated_relation_type,
@@ -216,6 +220,20 @@ def register_work_item_property_tools(mcp: FastMCP) -> None:
                 data=data,
             )
         return client.workspace_work_item_properties.create(workspace_slug=workspace_slug, data=data)
+
+    @mcp.tool()
+    def slugify_name(text: str) -> str:
+        """
+        Convert a human-readable name to the snake_case slug Plane uses for a
+        custom property's internal ``name`` (for composing PQL cf[] queries).
+
+        "ICE Score" -> "ice_score". Matches the server-side derivation applied
+        when create_work_item_property is called without an explicit ``name``.
+        """
+        import re
+
+        slug = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+        return slug or "untitled"
 
     @mcp.tool()
     def retrieve_work_item_property(

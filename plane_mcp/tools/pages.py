@@ -1,6 +1,6 @@
 """Page-related tools for Plane MCP Server."""
 
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from plane.models.pages import CreatePage, Page
@@ -16,6 +16,7 @@ def register_page_tools(mcp: FastMCP) -> None:
     def list_pages(
         project_id: str | None = None,
         params: dict[str, Any] | None = None,
+        include_archived: bool = False,
     ) -> list[Page]:
         """
         List pages.
@@ -25,6 +26,8 @@ def register_page_tools(mcp: FastMCP) -> None:
         Args:
             project_id: UUID of the project. Omit to list workspace pages.
             params: Optional query parameters as a dictionary (e.g., per_page, cursor)
+            include_archived: If True, also include archived pages
+                (default False — only active pages).
 
         Returns:
             List of Page objects
@@ -32,10 +35,15 @@ def register_page_tools(mcp: FastMCP) -> None:
         client, workspace_slug = get_plane_client_context()
         if project_id is not None:
             response = client.pages.list_project_pages(
-                workspace_slug=workspace_slug, project_id=project_id, params=params
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                params=params,
+                include_archived=include_archived,
             )
         else:
-            response = client.pages.list_workspace_pages(workspace_slug=workspace_slug, params=params)
+            response = client.pages.list_workspace_pages(
+                workspace_slug=workspace_slug, params=params, include_archived=include_archived
+            )
         return response.results
 
     @mcp.tool()
@@ -98,7 +106,9 @@ def register_page_tools(mcp: FastMCP) -> None:
         Args:
             project_id: UUID of the project
             work_item_id: UUID of the work item
-            work_item_page_id: UUID of the work item page link (not the page ID)
+            work_item_page_id: UUID of the LINK record (NOT the page_id). The link
+                has its own UUID, returned by attach_page_to_work_item; find it via
+                list_work_item_pages(work_item_id).
         """
         client, workspace_slug = get_plane_client_context()
         client.work_items.pages.delete(
@@ -160,7 +170,8 @@ def register_page_tools(mcp: FastMCP) -> None:
 
         Args:
             name: Page name
-            description_html: Page content in HTML format
+            description_html: Page content in HTML. REQUIRED and must be non-empty
+                (Plane rejects empty strings — pass "<p></p>" or " " for an empty page).
             project_id: UUID of the project. Omit to create a workspace page.
             access: Access level for the page (integer)
             color: Page color
@@ -199,3 +210,104 @@ def register_page_tools(mcp: FastMCP) -> None:
             workspace_slug=workspace_slug,
             data=data,
         )
+
+    @mcp.tool()
+    def update_page(
+        project_id: str,
+        page_id: str,
+        name: str | None = None,
+        description_html: str | None = None,
+        access: int | None = None,
+        is_locked: bool | None = None,
+    ) -> Page:
+        """
+        Update a project page's title, content, access or lock state (PATCH).
+
+        At least one of name / description_html / access / is_locked must be
+        provided; omitted fields are left unchanged.
+
+        Args:
+            project_id: UUID of the project the page belongs to.
+            page_id: UUID of the page to update.
+            name: New title.
+            description_html: New HTML content. Must be non-empty if provided.
+            access: 0 = public (workspace), 1 = private (creator only).
+            is_locked: If True, the page becomes read-only.
+
+        Returns:
+            Updated Page object.
+        """
+        client, workspace_slug = get_plane_client_context()
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if description_html is not None:
+            if not description_html.strip():
+                raise ValueError("description_html must be non-empty")
+            body["description_html"] = description_html
+        if access is not None:
+            body["access"] = access
+        if is_locked is not None:
+            body["is_locked"] = is_locked
+        if not body:
+            raise ValueError("provide at least one field to update")
+        return client.pages.update_project_page(
+            workspace_slug=workspace_slug,
+            project_id=project_id,
+            page_id=page_id,
+            data=body,
+        )
+
+    @mcp.tool()
+    def delete_page(
+        page_id: str,
+        project_id: str | None = None,
+    ) -> None:
+        """
+        Permanently delete a page. Irreversible — consider manage_page_archive
+        (action='archive') if you might want to restore it.
+
+        Deletes a project page if project_id is given, otherwise a workspace page.
+
+        Args:
+            page_id: UUID of the page to delete.
+            project_id: UUID of the project. Omit for a workspace page.
+        """
+        client, workspace_slug = get_plane_client_context()
+        if project_id is not None:
+            client.pages.delete_project_page(
+                workspace_slug=workspace_slug, project_id=project_id, page_id=page_id
+            )
+        else:
+            client.pages.delete_workspace_page(workspace_slug=workspace_slug, page_id=page_id)
+
+    @mcp.tool()
+    def manage_page_archive(
+        project_id: str,
+        page_id: str,
+        action: Literal["archive", "unarchive"],
+    ) -> Any:
+        """
+        Archive or unarchive a project page (soft delete).
+
+        Archived pages are hidden from list_pages() unless include_archived=True.
+        Reversible via action='unarchive'.
+
+        Args:
+            project_id: UUID of the project.
+            page_id: UUID of the page.
+            action: 'archive' or 'unarchive'.
+
+        Returns:
+            {"archived_at": <date|null>}.
+        """
+        client, workspace_slug = get_plane_client_context()
+        if action == "archive":
+            return client.pages.archive_project_page(
+                workspace_slug=workspace_slug, project_id=project_id, page_id=page_id
+            )
+        if action == "unarchive":
+            return client.pages.unarchive_project_page(
+                workspace_slug=workspace_slug, project_id=project_id, page_id=page_id
+            )
+        raise ValueError(f"action must be 'archive' or 'unarchive', got {action!r}")

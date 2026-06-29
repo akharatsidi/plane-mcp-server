@@ -22,7 +22,11 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
         params: dict[str, Any] | None = None,
     ) -> list[WorkItemType]:
         """
-        List work item types. Omit project_id for workspace-level types.
+        List work item types.
+
+        - project_id provided: types usable in that project (+ workspace defaults).
+        - project_id omitted: workspace-level types only.
+        In the default Plane configuration the project types are Task (default), Story, Epic.
 
         Each result's `id` is the `work_item_type_id` needed by list_work_item_properties
         to look up custom property and option UUIDs for PQL cf[] filters.

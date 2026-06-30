@@ -59,15 +59,32 @@ def register_view_tools(mcp: FastMCP) -> None:
 
         Args:
             name: Name of the view
-            filters: Filter configuration dictionary
-            display_filters: Display filter configuration dictionary
+            filters: The saved filter — THIS is what makes a view non-empty. A dict
+                mapping filter keys to LISTS of values (always lists, even for one
+                value). Supported keys:
+                  priority     -> list of "urgent"|"high"|"medium"|"low"|"none"
+                  state        -> list of state UUIDs (see list_states)
+                  state_group  -> list of "backlog"|"unstarted"|"started"|"completed"|"cancelled"
+                  assignees    -> list of member UUIDs (see get_project_members)
+                  created_by   -> list of member UUIDs
+                  labels       -> list of label UUIDs (see list_labels)
+                  cycle        -> list of cycle UUIDs;  module -> list of module UUIDs
+                  type         -> list of work-item-type UUIDs (see list_work_item_types)
+                  subscriber / mentions / parent -> list of UUIDs
+                  start_date / target_date / created_at -> list of date terms
+                Example: {"priority": ["urgent", "high"], "assignees": ["<member-uuid>"],
+                          "labels": ["<label-uuid>"]}
+                Omit or pass {} for a view with no filter (an "empty" view).
+            display_filters: Display/layout config dict (group_by, order_by, layout, etc.).
+                Optional; controls presentation, not which items match.
             description: Description of the view
-            query: Query configuration dictionary
+            query: IGNORED on write — the server computes the live `query` from `filters`
+                automatically. Do NOT set this; set `filters` instead.
             access: Access level (0 = Private, 1 = Public)
             project_id: UUID of the project. Omit to create a workspace view.
 
         Returns:
-            Created View object
+            Created View object (its `filters` echoes what you sent; `query` is derived).
         """
         client, workspace_slug = get_plane_client_context()
 
@@ -134,10 +151,13 @@ def register_view_tools(mcp: FastMCP) -> None:
         Args:
             view_id: UUID of the view
             name: Name of the view
-            filters: Filter configuration dictionary
-            display_filters: Display filter configuration dictionary
+            filters: The saved filter (same schema as create_view — a dict of filter
+                keys to LISTS, e.g. {"priority": ["urgent"], "assignees": ["<uuid>"]}).
+                This is what populates the view; passing it replaces the stored filter.
+            display_filters: Display/layout config dict (group_by, order_by, layout).
             description: Description of the view
-            query: Query configuration dictionary
+            query: IGNORED on write — the server derives `query` from `filters`. Set
+                `filters`, not `query`.
             access: Access level (0 = Private, 1 = Public)
             project_id: UUID of the project. Omit for a workspace view.
 

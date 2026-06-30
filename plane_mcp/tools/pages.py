@@ -185,6 +185,9 @@ def register_page_tools(mcp: FastMCP) -> None:
         Returns:
             Created Page object
         """
+        if not description_html or not description_html.strip():
+            raise ValueError("description_html must be non-empty (pass ' ' for an empty page)")
+
         client, workspace_slug = get_plane_client_context()
 
         data = CreatePage(

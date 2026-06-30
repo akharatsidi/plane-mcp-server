@@ -377,19 +377,17 @@ def register_work_item_property_tools(mcp: FastMCP) -> None:
         Delete a work item property by ID.
 
         Args:
-            work_item_property_id: UUID of the property
-            project_id: UUID of the project. Omit for workspace scope.
-            work_item_type_id: UUID of the work item type — omit to use project-level endpoint
+            work_item_property_id: UUID of the property to delete.
+            project_id: UUID of the project (for project-scoped properties).
+                Omit for a workspace-scoped property.
+            work_item_type_id: Deprecated/ignored — a property is identified by
+                project_id + property_id; the type is a field, not part of the path.
         """
         client, workspace_slug = get_plane_client_context()
-        if project_id and work_item_type_id:
-            client.work_item_properties.delete(
-                workspace_slug=workspace_slug,
-                project_id=project_id,
-                type_id=work_item_type_id,
-                work_item_property_id=work_item_property_id,
-            )
-        elif project_id:
+        # Always use the project-flat path: type_id is NOT a URL segment (the
+        # type-scoped delete route 500'd). work_item_type_id is accepted for
+        # backward compatibility but ignored.
+        if project_id:
             client.work_item_properties.delete_project(
                 workspace_slug=workspace_slug,
                 project_id=project_id,

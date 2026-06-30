@@ -45,6 +45,7 @@ def register_view_tools(mcp: FastMCP) -> None:
     def create_view(
         name: str,
         filters: dict[str, Any] | None = None,
+        rich_filters: dict[str, Any] | None = None,
         display_filters: dict[str, Any] | None = None,
         description: str | None = None,
         query: dict[str, Any] | None = None,
@@ -75,6 +76,14 @@ def register_view_tools(mcp: FastMCP) -> None:
                 Example: {"priority": ["urgent", "high"], "assignees": ["<member-uuid>"],
                           "labels": ["<label-uuid>"]}
                 Omit or pass {} for a view with no filter (an "empty" view).
+            rich_filters: THE field the Plane UI renders the work-item list from
+                (`filters`/`query` are legacy and do NOT drive the UI list — a view
+                with only `filters` shows up EMPTY in the UI). Use Django-ORM-style
+                keys, e.g.:
+                  {"priority__in": ["urgent","high"], "assignees__in": ["<member-uuid>"],
+                   "state__group__in": ["backlog","unstarted","started"], "labels__in": ["<label-uuid>"]}
+                If omitted it auto-derives from `filters`. To make a view that actually
+                shows a filtered list in the UI, SET THIS (or `filters`).
             display_filters: Display/layout config dict (group_by, order_by, layout, etc.).
                 Optional; controls presentation, not which items match.
             description: Description of the view
@@ -91,6 +100,12 @@ def register_view_tools(mcp: FastMCP) -> None:
         data_kwargs: dict[str, Any] = {"name": name}
         if filters is not None:
             data_kwargs["filters"] = filters
+        # rich_filters is the field the Plane UI renders the work-item list from
+        # (filters/query are legacy). Use the explicit value, else fall back to
+        # `filters` so the view is not empty in the UI.
+        effective_rich = rich_filters if rich_filters is not None else filters
+        if effective_rich is not None:
+            data_kwargs["rich_filters"] = effective_rich
         if display_filters is not None:
             data_kwargs["display_filters"] = display_filters
         if description is not None:
@@ -136,6 +151,7 @@ def register_view_tools(mcp: FastMCP) -> None:
         view_id: str,
         name: str | None = None,
         filters: dict[str, Any] | None = None,
+        rich_filters: dict[str, Any] | None = None,
         display_filters: dict[str, Any] | None = None,
         description: str | None = None,
         query: dict[str, Any] | None = None,
@@ -154,6 +170,9 @@ def register_view_tools(mcp: FastMCP) -> None:
             filters: The saved filter (same schema as create_view — a dict of filter
                 keys to LISTS, e.g. {"priority": ["urgent"], "assignees": ["<uuid>"]}).
                 This is what populates the view; passing it replaces the stored filter.
+            rich_filters: THE field the Plane UI renders the list from (see create_view).
+                Set this (ORM-style keys, e.g. {"priority__in": ["urgent"]}) to change
+                what the view shows; auto-derives from `filters` if omitted.
             display_filters: Display/layout config dict (group_by, order_by, layout).
             description: Description of the view
             query: IGNORED on write — the server derives `query` from `filters`. Set
@@ -171,6 +190,11 @@ def register_view_tools(mcp: FastMCP) -> None:
             data_kwargs["name"] = name
         if filters is not None:
             data_kwargs["filters"] = filters
+        # rich_filters drives the Plane UI list (see create_view). Explicit value
+        # wins; otherwise fall back to `filters` when that was supplied.
+        effective_rich = rich_filters if rich_filters is not None else filters
+        if effective_rich is not None:
+            data_kwargs["rich_filters"] = effective_rich
         if display_filters is not None:
             data_kwargs["display_filters"] = display_filters
         if description is not None:
